@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class RunningMeanStd:
-    """Welford's online algorithm for running mean/variance."""
+    """Welford's online algorithm for running mean/variance (scalar)."""
 
     def __init__(self) -> None:
         self.mean = 0.0
@@ -50,9 +50,45 @@ class RunningMeanStd:
         delta2 = x - self.mean
         self.var += (delta * delta2 - self.var) / self.count
 
-    def normalize(self, x: float) -> float:
+    def normalize(self, x: float, clip: float = 10.0) -> float:
         std = max(np.sqrt(self.var), 1e-8)
-        return (x - self.mean) / std
+        return float(np.clip((x - self.mean) / std, -clip, clip))
+
+    def state_dict(self) -> dict:
+        return {"mean": self.mean, "var": self.var, "count": self.count}
+
+    def load_state_dict(self, d: dict) -> None:
+        self.mean = d["mean"]
+        self.var = d["var"]
+        self.count = d["count"]
+
+
+class VectorRunningMeanStd:
+    """Welford's online algorithm for running mean/variance (vector)."""
+
+    def __init__(self, shape: int) -> None:
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = 1e-4
+
+    def update(self, x: np.ndarray) -> None:
+        self.count += 1
+        delta = x.astype(np.float64) - self.mean
+        self.mean += delta / self.count
+        delta2 = x.astype(np.float64) - self.mean
+        self.var += (delta * delta2 - self.var) / self.count
+
+    def normalize(self, x: np.ndarray, clip: float = 10.0) -> np.ndarray:
+        std = np.maximum(np.sqrt(self.var), 1e-8)
+        return np.clip((x.astype(np.float64) - self.mean) / std, -clip, clip).astype(np.float32)
+
+    def state_dict(self) -> dict:
+        return {"mean": self.mean.tolist(), "var": self.var.tolist(), "count": self.count}
+
+    def load_state_dict(self, d: dict) -> None:
+        self.mean = np.array(d["mean"], dtype=np.float64)
+        self.var = np.array(d["var"], dtype=np.float64)
+        self.count = d["count"]
 
 
 @dataclass
@@ -65,7 +101,7 @@ class TrainerConfig:
 
     # PPO
     learning_rate: float = 3e-4
-    n_steps: int = 2048
+    n_steps: int = 4096
     batch_size: int = 64
     n_epochs: int = 10
     gamma: float = 0.99
@@ -75,6 +111,7 @@ class TrainerConfig:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: float | None = 0.02
+    clip_range_vf: float | None = 0.2
 
     # Reward
     w_audio: float = 0.7
@@ -172,6 +209,9 @@ class OpenJawTrainer:
             lr=self.config.learning_rate,
         )
         logger.info(f"Policy network: {self.policy.param_count()} parameters")
+
+        # Observation normalization (running mean/std per dimension)
+        self._obs_normalizer = VectorRunningMeanStd(obs_dim)
 
         # Reward normalization (running std)
         self._reward_normalizer = RunningMeanStd()
@@ -384,8 +424,12 @@ class OpenJawTrainer:
             done = False
 
             while not done and not buffer.full:
+                # Normalize observation
+                self._obs_normalizer.update(obs)
+                obs_norm = self._obs_normalizer.normalize(obs)
+
                 # Get action from policy
-                obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.config.device).unsqueeze(0)
+                obs_tensor = torch.as_tensor(obs_norm, dtype=torch.float32, device=self.config.device).unsqueeze(0)
                 with torch.no_grad():
                     dist = self.policy.get_action_distribution(obs_tensor)
                     action_tensor = dist.sample()
@@ -416,13 +460,13 @@ class OpenJawTrainer:
                     prev_action=prev_action,
                 )
 
-                # Normalize reward
+                # Normalize reward (with clipping)
                 self._reward_normalizer.update(reward_out.total)
                 normalized_reward = self._reward_normalizer.normalize(reward_out.total)
 
-                # Store transition
+                # Store transition (normalized obs)
                 buffer.add(
-                    obs=obs,
+                    obs=obs_norm,
                     action=action_np,
                     log_prob=log_prob.item(),
                     reward=normalized_reward,
@@ -443,8 +487,9 @@ class OpenJawTrainer:
             if phase_changed and not self.curriculum.is_complete:
                 self._update_reward_mode()
 
-        # Bootstrap value for GAE
-        obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.config.device).unsqueeze(0)
+        # Bootstrap value for GAE (use normalized obs)
+        obs_norm = self._obs_normalizer.normalize(obs)
+        obs_tensor = torch.as_tensor(obs_norm, dtype=torch.float32, device=self.config.device).unsqueeze(0)
         with torch.no_grad():
             last_value = self.policy.critic(obs_tensor).squeeze().item()
         buffer.compute_returns_and_advantages(last_value)
@@ -482,11 +527,20 @@ class OpenJawTrainer:
             1, self.config.n_steps // self.config.episode_length
         )
 
+        # Learning rate linear decay
+        initial_lr = self.config.learning_rate
+
         results = []
         episodes_trained = 0
         rollout_idx = 0
 
         while episodes_trained < num_episodes:
+            # Linear LR decay based on progress
+            progress = min(episodes_trained / max(num_episodes, 1), 1.0)
+            current_lr = initial_lr * (1.0 - progress)
+            current_lr = max(current_lr, 1e-6)  # floor
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = current_lr
             buffer = RolloutBuffer(
                 buffer_size=steps_per_rollout,
                 obs_dim=obs_dim,
@@ -514,6 +568,7 @@ class OpenJawTrainer:
                 ent_coef=self.config.ent_coef,
                 max_grad_norm=self.config.max_grad_norm,
                 target_kl=self.config.target_kl,
+                clip_range_vf=self.config.clip_range_vf,
             )
 
             # Log
@@ -523,7 +578,7 @@ class OpenJawTrainer:
                 policy_loss=update_result.policy_loss,
                 value_loss=update_result.value_loss,
                 entropy=update_result.entropy,
-                learning_rate=self.config.learning_rate,
+                learning_rate=current_lr,
             )
             self.logger.log_scalar(
                 "train/explained_variance", update_result.explained_variance, step=rollout_idx,
@@ -579,11 +634,8 @@ class OpenJawTrainer:
             "curriculum_episodes_in_phase": self.curriculum._episodes_in_phase,
             "config": self.config,
             "episode_rewards": self._episode_rewards[-100:],  # Last 100
-            "reward_normalizer": {
-                "mean": self._reward_normalizer.mean,
-                "var": self._reward_normalizer.var,
-                "count": self._reward_normalizer.count,
-            },
+            "reward_normalizer": self._reward_normalizer.state_dict(),
+            "obs_normalizer": self._obs_normalizer.state_dict(),
         }
         if hasattr(self, "policy"):
             checkpoint["policy_state_dict"] = self.policy.state_dict()
@@ -603,10 +655,9 @@ class OpenJawTrainer:
         self.curriculum._total_episodes = self._episode_count
         self._episode_rewards = checkpoint.get("episode_rewards", [])
         if "reward_normalizer" in checkpoint:
-            rn = checkpoint["reward_normalizer"]
-            self._reward_normalizer.mean = rn["mean"]
-            self._reward_normalizer.var = rn["var"]
-            self._reward_normalizer.count = rn["count"]
+            self._reward_normalizer.load_state_dict(checkpoint["reward_normalizer"])
+        if "obs_normalizer" in checkpoint:
+            self._obs_normalizer.load_state_dict(checkpoint["obs_normalizer"])
         self._update_reward_mode()
         if "policy_state_dict" in checkpoint and hasattr(self, "policy"):
             self.policy.load_state_dict(checkpoint["policy_state_dict"])

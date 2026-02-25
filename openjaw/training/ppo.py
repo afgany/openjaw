@@ -45,8 +45,13 @@ def compute_ppo_loss(
     clip_range: float = 0.2,
     vf_coef: float = 0.5,
     ent_coef: float = 0.01,
+    clip_range_vf: float | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Compute PPO clipped objective + value loss + entropy bonus.
+
+    Args:
+        clip_range_vf: If set, clip value function updates to this range
+            around old_values (SB3 convention). None = no clipping.
 
     Returns:
         (total_loss, info_dict) where info_dict has diagnostic metrics.
@@ -64,8 +69,16 @@ def compute_ppo_loss(
     pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
     policy_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-    # Value loss (MSE)
-    value_loss = nn.functional.mse_loss(new_values, returns)
+    # Value loss (clipped or MSE)
+    if clip_range_vf is not None:
+        values_clipped = old_values + torch.clamp(
+            new_values - old_values, -clip_range_vf, clip_range_vf,
+        )
+        vf_loss1 = (new_values - returns).pow(2)
+        vf_loss2 = (values_clipped - returns).pow(2)
+        value_loss = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
+    else:
+        value_loss = nn.functional.mse_loss(new_values, returns)
 
     # Total loss
     total_loss = policy_loss + vf_coef * value_loss - ent_coef * entropy
@@ -96,6 +109,7 @@ def ppo_update(
     ent_coef: float = 0.01,
     max_grad_norm: float = 0.5,
     target_kl: float | None = None,
+    clip_range_vf: float | None = None,
 ) -> PPOUpdateResult:
     """Run n_epochs of PPO updates over the rollout buffer.
 
@@ -123,6 +137,7 @@ def ppo_update(
                 clip_range=clip_range,
                 vf_coef=vf_coef,
                 ent_coef=ent_coef,
+                clip_range_vf=clip_range_vf,
             )
 
             optimizer.zero_grad()
