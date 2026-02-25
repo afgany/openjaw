@@ -2,7 +2,7 @@
 
 **Mathematical RL Framework for Closed-Loop Visual-Acoustic Articulatory Speech Imitation**
 
-📄 **[Read the Paper (PDF)](paper/main.pdf)**
+📄 **[Read the Paper (PDF)](paper/main.pdf)** | [PDF](paper/main.pdf)
 
 OpenJaw is a research framework that formulates speech production as a reinforcement learning problem: an agent learns to control 13 articulatory degrees of freedom (tongue, jaw, lips) in a MuJoCo physics simulation, receiving audio (via SPARC decoder) and visual (via mesh rendering) feedback to imitate a target speaker's speech patterns.
 
