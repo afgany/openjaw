@@ -29,6 +29,8 @@ def main() -> None:
                         help="Use random actions instead of PPO (baseline)")
     parser.add_argument("--lr", type=float, default=3e-4,
                         help="Learning rate (default: 3e-4)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume training from")
     args = parser.parse_args()
 
     config = TrainerConfig(
@@ -43,6 +45,10 @@ def main() -> None:
 
     trainer = OpenJawTrainer(config)
     trainer.setup()
+
+    if args.resume:
+        trainer.load_checkpoint(args.resume)
+        print(f"Resumed from {args.resume} (episode {trainer._episode_count})")
 
     try:
         if args.random_actions:

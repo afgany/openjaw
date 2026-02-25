@@ -526,6 +526,9 @@ class OpenJawTrainer:
                 f"value_loss={update_result.value_loss:.4f}"
             )
 
+        # Always save final checkpoint
+        self.save_checkpoint()
+
         return results
 
     def save_checkpoint(self, path: str | None = None) -> str:
