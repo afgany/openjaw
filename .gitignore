@@ -57,3 +57,6 @@ paper/*.synctex.gz
 
 # Claude
 .claude/
+
+# Local session prompts
+PART*_SESSION_PROMPT.md
