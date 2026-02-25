@@ -34,10 +34,7 @@
 
 \title{\openjaw{} Part~I: Architecture and Mathematical Framework\\for RL-Based Visual-Acoustic Articulatory Speech Imitation}
 
-\author{
-  Anonymous Authors \\
-  \texttt{anonymous@anonymous.org}
-}
+\author{\large White Paper}
 
 \begin{document}
 
@@ -443,6 +440,10 @@ We presented \openjaw{} Part~I, establishing the architecture and mathematical f
 \section*{Reproducibility Statement}
 
 All code, configurations, and training scripts are available at \url{https://github.com/afgany/openjaw}. The implementation uses fixed random seeds (default: 42) across all stochastic components. Training can resume from any checkpoint via \texttt{--resume <path>}. Hardware requirements for Part~I validation: any machine with Python 3.12 and $\geq$8~GB RAM (CPU-only). Expected time for 10,000-episode validation run: $\sim$5 minutes on Apple M1 Pro. All 229 unit and integration tests pass as of submission.
+
+\section*{Acknowledgments}
+
+The author, Ph.D.\ OR, is an independent researcher. The author acknowledges that this white paper research was not peer-reviewed.
 
 \bibliography{references}
 \bibliographystyle{plainnat}
