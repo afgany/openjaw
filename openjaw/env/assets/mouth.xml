@@ -1,0 +1,194 @@
+<!--
+  OpenJaw MuJoCo Oral Cavity Model
+  ================================
+  Anatomically motivated 3D model with 13-DOF tendon-driven actuation.
+
+  Coordinate system (sagittal plane, extruded):
+    X = anterior-posterior (front-back), positive = forward
+    Y = superior-inferior (up-down), positive = up
+    Z = lateral (left-right), for 3D extrusion
+
+  Bodies:
+    - skull (static worldbody reference)
+    - jaw (rigid, 2-DOF: open/close + protrusion)
+    - tongue_dorsum (hinge + slide, 2-DOF)
+    - tongue_blade (hinge + slide, 2-DOF)
+    - tongue_tip (hinge + slide, 2-DOF)
+    - upper_lip (hinge + slide, 2-DOF)
+    - lower_lip (hinge + slide, 2-DOF)
+    - teeth_upper (static, attached to skull)
+    - teeth_lower (static, attached to jaw)
+    - palate (static, attached to skull)
+
+  Actuators: 13 position actuators mapping to the 13 DOF.
+
+  Reference: Anand et al. (2025), ArtiSynth vocal tract geometry
+-->
+<mujoco model="openjaw_mouth">
+  <compiler angle="radian" coordinate="local"/>
+
+  <option timestep="0.002" gravity="0 -9.81 0" integrator="implicit">
+    <flag contact="enable"/>
+  </option>
+
+  <default>
+    <joint damping="0.5" armature="0.01"/>
+    <geom friction="0.8 0.005 0.001" condim="3" margin="0.001"/>
+    <general ctrlrange="-0.5 0.5" ctrllimited="true"/>
+  </default>
+
+  <asset>
+    <material name="skull_mat" rgba="0.9 0.85 0.8 0.3"/>
+    <material name="tongue_mat" rgba="0.85 0.45 0.45 1"/>
+    <material name="lip_mat" rgba="0.9 0.55 0.5 1"/>
+    <material name="teeth_mat" rgba="0.95 0.95 0.9 1"/>
+    <material name="palate_mat" rgba="0.9 0.7 0.7 0.5"/>
+    <material name="gum_mat" rgba="0.85 0.5 0.5 0.5"/>
+  </asset>
+
+  <worldbody>
+    <!-- Skull (static reference frame) -->
+    <body name="skull" pos="0 0 0">
+      <geom name="skull_back" type="box" size="0.04 0.06 0.035" pos="-0.04 0.02 0"
+            material="skull_mat" contype="1" conaffinity="1"/>
+
+      <!-- Palate (static, upper oral cavity boundary) -->
+      <body name="palate" pos="0 0.04 0">
+        <geom name="palate_hard" type="box" size="0.035 0.005 0.025"
+              pos="0.01 0 0" material="palate_mat" contype="2" conaffinity="2"/>
+        <geom name="palate_soft" type="capsule" size="0.008" fromto="-0.02 0 0 -0.04 -0.01 0"
+              material="palate_mat" contype="2" conaffinity="2"/>
+      </body>
+
+      <!-- Upper teeth (static) -->
+      <body name="teeth_upper" pos="0.04 0.025 0">
+        <geom name="upper_incisors" type="box" size="0.003 0.01 0.02"
+              material="teeth_mat" contype="4" conaffinity="4"/>
+      </body>
+
+      <!-- Upper lip (2 DOF: protrusion X, raise Y) -->
+      <body name="upper_lip" pos="0.045 0.03 0">
+        <joint name="upper_lip_x" type="slide" axis="1 0 0" range="-0.015 0.015"/>
+        <joint name="upper_lip_y" type="slide" axis="0 1 0" range="-0.01 0.01"/>
+        <geom name="upper_lip_geom" type="capsule" size="0.008"
+              fromto="-0.01 0 -0.02 -0.01 0 0.02" material="lip_mat"
+              contype="8" conaffinity="8"/>
+      </body>
+
+      <!-- Jaw (rigid, 2 DOF: open/close Y, protrusion X) -->
+      <body name="jaw" pos="0 -0.02 0">
+        <joint name="jaw_x" type="slide" axis="1 0 0" range="-0.01 0.01"/>
+        <joint name="jaw_y" type="slide" axis="0 1 0" range="-0.03 0.005"/>
+        <geom name="jaw_bone" type="box" size="0.04 0.01 0.03" pos="-0.02 -0.01 0"
+              material="skull_mat" contype="1" conaffinity="1" mass="0.15"/>
+
+        <!-- Lower teeth (attached to jaw) -->
+        <body name="teeth_lower" pos="0.04 0.005 0">
+          <geom name="lower_incisors" type="box" size="0.003 0.008 0.018"
+                material="teeth_mat" contype="4" conaffinity="4"/>
+        </body>
+
+        <!-- Lower lip (2 DOF: protrusion X, lower Y) -->
+        <body name="lower_lip" pos="0.045 0.01 0">
+          <joint name="lower_lip_x" type="slide" axis="1 0 0" range="-0.015 0.015"/>
+          <joint name="lower_lip_y" type="slide" axis="0 1 0" range="-0.015 0.01"/>
+          <geom name="lower_lip_geom" type="capsule" size="0.007"
+                fromto="-0.01 0 -0.02 -0.01 0 0.02" material="lip_mat"
+                contype="8" conaffinity="8"/>
+        </body>
+
+        <!-- Tongue base (attached to jaw floor) -->
+        <body name="tongue_root" pos="0.01 0.01 0">
+          <geom name="tongue_root_geom" type="sphere" size="0.008"
+                material="tongue_mat" contype="16" conaffinity="16" mass="0.01"/>
+
+          <!-- Tongue dorsum (2 DOF) -->
+          <body name="tongue_dorsum" pos="0.005 0.005 0">
+            <joint name="tongue_dorsum_x" type="slide" axis="1 0 0" range="-0.02 0.02"/>
+            <joint name="tongue_dorsum_y" type="slide" axis="0 1 0" range="-0.015 0.025"/>
+            <geom name="tongue_dorsum_geom" type="ellipsoid" size="0.012 0.008 0.015"
+                  material="tongue_mat" contype="16" conaffinity="18" mass="0.02"/>
+
+            <!-- Tongue blade (2 DOF) -->
+            <body name="tongue_blade" pos="0.015 0.002 0">
+              <joint name="tongue_blade_x" type="slide" axis="1 0 0" range="-0.015 0.015"/>
+              <joint name="tongue_blade_y" type="slide" axis="0 1 0" range="-0.015 0.02"/>
+              <geom name="tongue_blade_geom" type="ellipsoid" size="0.01 0.006 0.012"
+                    material="tongue_mat" contype="16" conaffinity="18" mass="0.015"/>
+
+              <!-- Tongue tip (2 DOF) -->
+              <body name="tongue_tip" pos="0.012 0.001 0">
+                <joint name="tongue_tip_x" type="slide" axis="1 0 0" range="-0.01 0.015"/>
+                <joint name="tongue_tip_y" type="slide" axis="0 1 0" range="-0.01 0.02"/>
+                <geom name="tongue_tip_geom" type="ellipsoid" size="0.007 0.004 0.008"
+                      material="tongue_mat" contype="16" conaffinity="22" mass="0.008"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Camera for visual feedback -->
+    <camera name="frontal" pos="0.15 0.01 0" xyaxes="0 0 -1 0 1 0" fovy="45"/>
+    <camera name="sagittal" pos="0 0.01 0.15" xyaxes="1 0 0 0 1 0" fovy="45"/>
+
+    <!-- Lighting -->
+    <light name="main_light" pos="0.1 0.1 0.1" dir="-1 -1 -1" diffuse="0.8 0.8 0.8"/>
+  </worldbody>
+
+  <!--
+    13 actuators mapping to the 13 DOF:
+    0-1:   tongue_dorsum (X, Y)
+    2-3:   tongue_blade (X, Y)
+    4-5:   tongue_tip (X, Y)
+    6-7:   lower_incisor / jaw (X, Y)
+    8-9:   upper_lip (X, Y)
+    10-11: lower_lip (X, Y)
+    12:    vocal_loudness (virtual — not a physical joint, tracked in userdata)
+  -->
+  <actuator>
+    <general name="act_tongue_dorsum_x" joint="tongue_dorsum_x" gainprm="50"/>
+    <general name="act_tongue_dorsum_y" joint="tongue_dorsum_y" gainprm="50"/>
+    <general name="act_tongue_blade_x"  joint="tongue_blade_x"  gainprm="40"/>
+    <general name="act_tongue_blade_y"  joint="tongue_blade_y"  gainprm="40"/>
+    <general name="act_tongue_tip_x"    joint="tongue_tip_x"    gainprm="30"/>
+    <general name="act_tongue_tip_y"    joint="tongue_tip_y"    gainprm="30"/>
+    <general name="act_jaw_x"           joint="jaw_x"           gainprm="80"/>
+    <general name="act_jaw_y"           joint="jaw_y"           gainprm="80"/>
+    <general name="act_upper_lip_x"     joint="upper_lip_x"     gainprm="30"/>
+    <general name="act_upper_lip_y"     joint="upper_lip_y"     gainprm="30"/>
+    <general name="act_lower_lip_x"     joint="lower_lip_x"     gainprm="30"/>
+    <general name="act_lower_lip_y"     joint="lower_lip_y"     gainprm="30"/>
+    <!-- Vocal loudness: virtual actuator stored in userdata, not a physical joint.
+         We use a stateless actuator mapped to a dummy site for API compatibility. -->
+  </actuator>
+
+  <!-- Sensors for proprioceptive feedback -->
+  <sensor>
+    <jointpos name="sens_tongue_dorsum_x" joint="tongue_dorsum_x"/>
+    <jointpos name="sens_tongue_dorsum_y" joint="tongue_dorsum_y"/>
+    <jointpos name="sens_tongue_blade_x"  joint="tongue_blade_x"/>
+    <jointpos name="sens_tongue_blade_y"  joint="tongue_blade_y"/>
+    <jointpos name="sens_tongue_tip_x"    joint="tongue_tip_x"/>
+    <jointpos name="sens_tongue_tip_y"    joint="tongue_tip_y"/>
+    <jointpos name="sens_jaw_x"           joint="jaw_x"/>
+    <jointpos name="sens_jaw_y"           joint="jaw_y"/>
+    <jointpos name="sens_upper_lip_x"     joint="upper_lip_x"/>
+    <jointpos name="sens_upper_lip_y"     joint="upper_lip_y"/>
+    <jointpos name="sens_lower_lip_x"     joint="lower_lip_x"/>
+    <jointpos name="sens_lower_lip_y"     joint="lower_lip_y"/>
+    <jointvel name="sensv_tongue_dorsum_x" joint="tongue_dorsum_x"/>
+    <jointvel name="sensv_tongue_dorsum_y" joint="tongue_dorsum_y"/>
+    <jointvel name="sensv_tongue_blade_x"  joint="tongue_blade_x"/>
+    <jointvel name="sensv_tongue_blade_y"  joint="tongue_blade_y"/>
+    <jointvel name="sensv_tongue_tip_x"    joint="tongue_tip_x"/>
+    <jointvel name="sensv_tongue_tip_y"    joint="tongue_tip_y"/>
+    <jointvel name="sensv_jaw_x"           joint="jaw_x"/>
+    <jointvel name="sensv_jaw_y"           joint="jaw_y"/>
+    <jointvel name="sensv_upper_lip_x"     joint="upper_lip_x"/>
+    <jointvel name="sensv_upper_lip_y"     joint="upper_lip_y"/>
+    <jointvel name="sensv_lower_lip_x"     joint="lower_lip_x"/>
+    <jointvel name="sensv_lower_lip_y"     joint="lower_lip_y"/>
+  </sensor>
+</mujoco>

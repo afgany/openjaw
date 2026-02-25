@@ -1,0 +1,88 @@
+# OpenJaw Default Configuration
+
+project:
+  name: "OpenJaw"
+  version: "0.1.0"
+  seed: 42
+
+# MDP specification
+mdp:
+  dof: 13
+  action_bounds: [-0.5, 0.5]
+  frame_stack: 15
+  episode_length: 50  # steps (2 seconds at 25Hz)
+  control_freq: 25    # Hz
+  physics_substeps: 20
+  discount: 0.99
+
+# Environment
+env:
+  num_envs: 16
+  render_width: 256
+  render_height: 256
+
+# Reward
+reward:
+  w_audio: 0.7
+  w_visual: 0.3
+  lambda_silence: 1.0
+  lambda_smooth: 0.01
+  lambda_energy: 0.001
+
+# Policy network
+policy:
+  hidden_sizes: [256, 256]
+  activation: "relu"
+  init: "orthogonal"
+  std_init: 0.7
+  std_min: 0.05
+  std_decay: 0.01
+  std_decay_interval: 100  # episodes
+
+# PPO
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+# Curriculum
+curriculum:
+  phases:
+    - name: "babbling"
+      episodes: 1000
+      reward_mode: "binary_sound"
+    - name: "vowels"
+      episodes: 5000
+      reward_mode: "audio_only"
+      targets: ["a", "e", "i", "o", "u"]
+    - name: "syllables"
+      episodes: 25000
+      reward_mode: "combined"
+    - name: "person_specific"
+      episodes: 25000
+      reward_mode: "combined"
+
+# Logging
+logging:
+  backend: "tensorboard"  # or "wandb"
+  log_dir: "logs/"
+  log_interval: 10  # episodes
+  checkpoint_dir: "checkpoints/"
+  checkpoint_interval: 1000  # episodes
+
+# Audio
+audio:
+  decoder: "sparc"
+  sample_rate: 16000
+
+# Data
+data:
+  vocaset_path: "data/vocaset/"
+  custom_speaker_path: "data/custom/"
