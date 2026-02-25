@@ -23,7 +23,7 @@ def main() -> None:
     trainer.setup()
 
     try:
-        results = trainer.train_ppo(num_episodes=10000)
+        results = trainer.train_ppo(num_episodes=1000)
     finally:
         trainer.close()
 
@@ -37,7 +37,7 @@ def main() -> None:
     episodes_trained = [r["episodes_trained"] for r in results]
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
-    fig.suptitle("OpenJaw PPO Training — 10,000 Episodes (Mock Encoders)", fontsize=14, fontweight="bold")
+    fig.suptitle("OpenJaw PPO Training — 1,000 Episodes (log_std clamp + KL stop + reward norm)", fontsize=14, fontweight="bold")
 
     # 1. Mean episode reward
     ax = axes[0, 0]

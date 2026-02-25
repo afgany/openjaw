@@ -35,6 +35,26 @@ from openjaw.visual.flame_adapter import FLAMEAdapter
 logger = logging.getLogger(__name__)
 
 
+class RunningMeanStd:
+    """Welford's online algorithm for running mean/variance."""
+
+    def __init__(self) -> None:
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4  # small epsilon to avoid div-by-zero
+
+    def update(self, x: float) -> None:
+        self.count += 1
+        delta = x - self.mean
+        self.mean += delta / self.count
+        delta2 = x - self.mean
+        self.var += (delta * delta2 - self.var) / self.count
+
+    def normalize(self, x: float) -> float:
+        std = max(np.sqrt(self.var), 1e-8)
+        return (x - self.mean) / std
+
+
 @dataclass
 class TrainerConfig:
     """Training configuration."""
@@ -54,6 +74,7 @@ class TrainerConfig:
     ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
+    target_kl: float | None = 0.02
 
     # Reward
     w_audio: float = 0.7
@@ -151,6 +172,9 @@ class OpenJawTrainer:
             lr=self.config.learning_rate,
         )
         logger.info(f"Policy network: {self.policy.param_count()} parameters")
+
+        # Reward normalization (running std)
+        self._reward_normalizer = RunningMeanStd()
 
         # Tracking
         self._episode_count = 0
@@ -392,12 +416,16 @@ class OpenJawTrainer:
                     prev_action=prev_action,
                 )
 
+                # Normalize reward
+                self._reward_normalizer.update(reward_out.total)
+                normalized_reward = self._reward_normalizer.normalize(reward_out.total)
+
                 # Store transition
                 buffer.add(
                     obs=obs,
                     action=action_np,
                     log_prob=log_prob.item(),
-                    reward=reward_out.total,
+                    reward=normalized_reward,
                     value=value.item(),
                     done=done,
                 )
@@ -485,6 +513,7 @@ class OpenJawTrainer:
                 vf_coef=self.config.vf_coef,
                 ent_coef=self.config.ent_coef,
                 max_grad_norm=self.config.max_grad_norm,
+                target_kl=self.config.target_kl,
             )
 
             # Log
@@ -550,6 +579,11 @@ class OpenJawTrainer:
             "curriculum_episodes_in_phase": self.curriculum._episodes_in_phase,
             "config": self.config,
             "episode_rewards": self._episode_rewards[-100:],  # Last 100
+            "reward_normalizer": {
+                "mean": self._reward_normalizer.mean,
+                "var": self._reward_normalizer.var,
+                "count": self._reward_normalizer.count,
+            },
         }
         if hasattr(self, "policy"):
             checkpoint["policy_state_dict"] = self.policy.state_dict()
@@ -568,6 +602,11 @@ class OpenJawTrainer:
         self.curriculum._episodes_in_phase = checkpoint["curriculum_episodes_in_phase"]
         self.curriculum._total_episodes = self._episode_count
         self._episode_rewards = checkpoint.get("episode_rewards", [])
+        if "reward_normalizer" in checkpoint:
+            rn = checkpoint["reward_normalizer"]
+            self._reward_normalizer.mean = rn["mean"]
+            self._reward_normalizer.var = rn["var"]
+            self._reward_normalizer.count = rn["count"]
         self._update_reward_mode()
         if "policy_state_dict" in checkpoint and hasattr(self, "policy"):
             self.policy.load_state_dict(checkpoint["policy_state_dict"])

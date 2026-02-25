@@ -98,6 +98,9 @@ class ActorCritic(nn.Module):
     Includes learnable log_std for Gaussian action distribution.
     """
 
+    LOG_STD_MIN: float = -5.0
+    LOG_STD_MAX: float = 2.0
+
     def __init__(
         self,
         obs_dim: int,
@@ -119,7 +122,8 @@ class ActorCritic(nn.Module):
     def get_action_distribution(self, obs: torch.Tensor) -> torch.distributions.Normal:
         """Get the action distribution for sampling."""
         action_mean = self.actor(obs)
-        std = self.log_std.exp()
+        clamped_log_std = self.log_std.clamp(self.LOG_STD_MIN, self.LOG_STD_MAX)
+        std = clamped_log_std.exp()
         return torch.distributions.Normal(action_mean, std)
 
     def param_count(self) -> int:
