@@ -27,6 +27,8 @@ def main() -> None:
     parser.add_argument("--use-real-sylber", action="store_true")
     parser.add_argument("--random-actions", action="store_true",
                         help="Use random actions instead of PPO (baseline)")
+    parser.add_argument("--lr", type=float, default=3e-4,
+                        help="Learning rate (default: 3e-4)")
     args = parser.parse_args()
 
     config = TrainerConfig(
@@ -36,6 +38,7 @@ def main() -> None:
         experiment_name=args.experiment,
         use_real_sparc=args.use_real_sparc,
         use_real_sylber=args.use_real_sylber,
+        learning_rate=args.lr,
     )
 
     trainer = OpenJawTrainer(config)
