@@ -1,4 +1,4 @@
-"""Step 10: Training pipeline tests (trainer, curriculum, logger)."""
+"""Step 10: Training pipeline tests (trainer, curriculum, logger, PPO training)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from openjaw.training.curriculum import CurriculumPhase, CurriculumScheduler, DEFAULT_PHASES
 from openjaw.training.logger import TrainingLogger
@@ -290,3 +291,93 @@ class TestOpenJawTrainer:
         history = result["positions_history"]
         assert history.shape[0] == trainer.config.episode_length
         assert history.shape[1] == 13  # 13 DOF
+
+
+# ── PPO Training ───────────────────────────────────────────────────────────
+
+class TestPPOTraining:
+    @pytest.fixture
+    def ppo_trainer(self, tmp_path):
+        config = TrainerConfig(
+            num_envs=1,
+            episode_length=10,
+            n_steps=20,  # Small buffer for testing
+            batch_size=10,
+            n_epochs=2,
+            seed=42,
+            log_dir=str(tmp_path / "logs"),
+            checkpoint_dir=str(tmp_path / "checkpoints"),
+            experiment_name="test_ppo",
+        )
+        t = OpenJawTrainer(config)
+        t.setup()
+        yield t
+        t.close()
+
+    def test_policy_created(self, ppo_trainer):
+        """setup() should create ActorCritic policy."""
+        assert hasattr(ppo_trainer, "policy")
+        assert hasattr(ppo_trainer, "optimizer")
+        assert ppo_trainer.policy.param_count() > 0
+
+    def test_train_ppo_runs(self, ppo_trainer):
+        """train_ppo should complete and return results."""
+        results = ppo_trainer.train_ppo(num_episodes=2)
+        assert len(results) >= 1
+        assert "policy_loss" in results[0]
+        assert "value_loss" in results[0]
+        assert "entropy" in results[0]
+        assert "mean_episode_reward" in results[0]
+
+    def test_params_change_after_training(self, ppo_trainer):
+        """PPO training should modify policy parameters."""
+        params_before = {
+            n: p.clone() for n, p in ppo_trainer.policy.named_parameters()
+        }
+
+        ppo_trainer.train_ppo(num_episodes=2)
+
+        any_changed = False
+        for name, param in ppo_trainer.policy.named_parameters():
+            if not torch.allclose(params_before[name], param):
+                any_changed = True
+                break
+        assert any_changed, "PPO training did not change any policy parameters"
+
+    def test_checkpoint_includes_policy(self, ppo_trainer, tmp_path):
+        """Checkpoint should contain policy and optimizer state dicts."""
+        ppo_trainer.train_ppo(num_episodes=2)
+        ckpt_path = ppo_trainer.save_checkpoint()
+        checkpoint = torch.load(ckpt_path, weights_only=False)
+        assert "policy_state_dict" in checkpoint
+        assert "optimizer_state_dict" in checkpoint
+
+    def test_checkpoint_restore_policy(self, ppo_trainer, tmp_path):
+        """Loading checkpoint should restore policy weights."""
+        ppo_trainer.train_ppo(num_episodes=2)
+        ckpt_path = ppo_trainer.save_checkpoint()
+
+        # Get trained weights
+        trained_weights = {
+            n: p.clone() for n, p in ppo_trainer.policy.named_parameters()
+        }
+
+        # Create fresh trainer and load checkpoint
+        config2 = TrainerConfig(
+            num_envs=1,
+            episode_length=10,
+            n_steps=20,
+            seed=42,
+            log_dir=str(tmp_path / "logs2"),
+            checkpoint_dir=str(tmp_path / "ckpt2"),
+            experiment_name="test_restore",
+        )
+        t2 = OpenJawTrainer(config2)
+        t2.setup()
+        t2.load_checkpoint(ckpt_path)
+
+        for name, param in t2.policy.named_parameters():
+            assert torch.allclose(trained_weights[name], param), (
+                f"Parameter {name} not restored correctly"
+            )
+        t2.close()

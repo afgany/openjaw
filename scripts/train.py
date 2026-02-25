@@ -25,6 +25,8 @@ def main() -> None:
     parser.add_argument("--experiment", type=str, default="openjaw_ppo")
     parser.add_argument("--use-real-sparc", action="store_true")
     parser.add_argument("--use-real-sylber", action="store_true")
+    parser.add_argument("--random-actions", action="store_true",
+                        help="Use random actions instead of PPO (baseline)")
     args = parser.parse_args()
 
     config = TrainerConfig(
@@ -40,9 +42,17 @@ def main() -> None:
     trainer.setup()
 
     try:
-        results = trainer.train(num_episodes=args.num_episodes)
-        avg_reward = sum(r["reward_total"] for r in results) / len(results)
-        print(f"\nTraining complete: {len(results)} episodes, avg reward: {avg_reward:.4f}")
+        if args.random_actions:
+            results = trainer.train(num_episodes=args.num_episodes)
+            avg_reward = sum(r["reward_total"] for r in results) / len(results)
+            print(f"\nTraining complete: {len(results)} episodes, avg reward: {avg_reward:.4f}")
+        else:
+            results = trainer.train_ppo(num_episodes=args.num_episodes)
+            avg_reward = sum(r["mean_episode_reward"] for r in results) / len(results)
+            print(
+                f"\nPPO training complete: {len(results)} rollouts, "
+                f"avg reward: {avg_reward:.4f}"
+            )
     finally:
         trainer.close()
 

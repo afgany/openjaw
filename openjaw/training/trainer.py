@@ -3,7 +3,8 @@
 Connects the MuJoCo environment, SPARC audio decoder, perception encoders,
 reward module, and policy network into a complete training pipeline.
 
-Uses Stable-Baselines3 PPO or a lightweight custom loop.
+Implements a custom PPO loop (not SB3) because rewards are computed
+externally via SPARC + Sylber, not by env.step().
 """
 
 from __future__ import annotations
@@ -19,12 +20,16 @@ import numpy as np
 import torch
 
 from openjaw.audio.sparc_decoder import BaseSPARCDecoder, create_sparc_decoder
+from openjaw.core.mdp import ObservationSpace
 from openjaw.core.types import AUDIO_SAMPLE_RATE, FloatArray, NUM_DOF
 from openjaw.env.mouth_env import MouthEnv
 from openjaw.perception.sylber import BaseSylberEncoder, create_sylber_encoder
+from openjaw.policy.networks import ActorCritic
 from openjaw.reward.combined import CombinedReward, RewardOutput
+from openjaw.training.buffer import RolloutBuffer
 from openjaw.training.curriculum import CurriculumPhase, CurriculumScheduler
 from openjaw.training.logger import TrainingLogger
+from openjaw.training.ppo import ppo_update
 from openjaw.visual.flame_adapter import FLAMEAdapter
 
 logger = logging.getLogger(__name__)
@@ -134,6 +139,18 @@ class OpenJawTrainer:
 
         # FLAME adapter for vertex extraction
         self.flame = FLAMEAdapter(self.env.cavity.model)
+
+        # Policy network + optimizer
+        obs_dim = ObservationSpace().dim  # 1353
+        self.policy = ActorCritic(
+            obs_dim=obs_dim,
+            action_dim=NUM_DOF,
+        ).to(self.config.device)
+        self.optimizer = torch.optim.Adam(
+            self.policy.parameters(),
+            lr=self.config.learning_rate,
+        )
+        logger.info(f"Policy network: {self.policy.param_count()} parameters")
 
         # Tracking
         self._episode_count = 0
@@ -306,6 +323,211 @@ class OpenJawTrainer:
 
         return results
 
+    def _collect_rollout(
+        self,
+        buffer: RolloutBuffer,
+        target_audio_emb: FloatArray | None = None,
+        target_lip_vertices: FloatArray | None = None,
+    ) -> dict[str, Any]:
+        """Collect one rollout of experience using the current policy.
+
+        Runs episodes until the buffer is full, computing rewards externally
+        via _compute_step_reward() at each step.
+
+        Returns:
+            Rollout summary dict.
+        """
+        buffer.reset()
+        episode_rewards: list[float] = []
+        episode_count = 0
+
+        while not buffer.full:
+            # Episode setup
+            t_audio = target_audio_emb if target_audio_emb is not None else np.zeros(768, dtype=np.float32)
+
+            obs, info = self.env.reset(
+                seed=self.config.seed + self._episode_count + episode_count
+            )
+
+            t_lip = (
+                target_lip_vertices
+                if target_lip_vertices is not None
+                else self.flame.get_lip_vertices(self.env.cavity.data).copy()
+            )
+
+            prev_action = np.zeros(NUM_DOF, dtype=np.float32)
+            ep_reward = 0.0
+            done = False
+
+            while not done and not buffer.full:
+                # Get action from policy
+                obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.config.device).unsqueeze(0)
+                with torch.no_grad():
+                    dist = self.policy.get_action_distribution(obs_tensor)
+                    action_tensor = dist.sample()
+                    log_prob = dist.log_prob(action_tensor).sum(dim=-1)
+                    value = self.policy.critic(obs_tensor).squeeze()
+
+                # Scale from tanh [-1,1] to env bounds [-0.5, 0.5]
+                action_np = action_tensor.squeeze(0).cpu().numpy() * 0.5
+                action_np = np.clip(action_np, -0.5, 0.5).astype(np.float32)
+
+                # Environment step
+                next_obs, _, terminated, truncated, info = self.env.step(action_np)
+                done = terminated or truncated
+                self._total_steps += 1
+
+                # Compute external reward
+                positions = info["positions"]
+                vocal_loudness = info["vocal_loudness"]
+                lip_verts = self.flame.get_lip_vertices(self.env.cavity.data)
+
+                reward_out = self._compute_step_reward(
+                    positions=positions,
+                    vocal_loudness=vocal_loudness,
+                    lip_vertices=lip_verts,
+                    target_audio_emb=t_audio,
+                    target_lip_vertices=t_lip,
+                    action=action_np,
+                    prev_action=prev_action,
+                )
+
+                # Store transition
+                buffer.add(
+                    obs=obs,
+                    action=action_np,
+                    log_prob=log_prob.item(),
+                    reward=reward_out.total,
+                    value=value.item(),
+                    done=done,
+                )
+
+                obs = next_obs
+                prev_action = action_np.copy()
+                ep_reward += reward_out.total
+
+            episode_rewards.append(ep_reward)
+            episode_count += 1
+            self._episode_count += 1
+
+            # Curriculum step
+            phase_changed = self.curriculum.step()
+            if phase_changed and not self.curriculum.is_complete:
+                self._update_reward_mode()
+
+        # Bootstrap value for GAE
+        obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.config.device).unsqueeze(0)
+        with torch.no_grad():
+            last_value = self.policy.critic(obs_tensor).squeeze().item()
+        buffer.compute_returns_and_advantages(last_value)
+
+        return {
+            "mean_episode_reward": float(np.mean(episode_rewards)),
+            "num_episodes": episode_count,
+            "mean_episode_length": buffer.pos / max(episode_count, 1),
+        }
+
+    def train_ppo(
+        self,
+        num_episodes: int,
+        target_audio_emb: FloatArray | None = None,
+        target_lip_vertices: FloatArray | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run PPO training for the specified number of episodes.
+
+        Collects rollouts using the policy, computes GAE advantages,
+        and performs PPO clipped updates.
+
+        Args:
+            num_episodes: Approximate number of episodes to train.
+            target_audio_emb: Target embedding (optional).
+            target_lip_vertices: Target lip vertices (optional).
+
+        Returns:
+            List of per-rollout summary dicts with loss metrics.
+        """
+        if not self._setup_done:
+            self.setup()
+
+        obs_dim = ObservationSpace().dim
+        steps_per_rollout = self.config.episode_length * max(
+            1, self.config.n_steps // self.config.episode_length
+        )
+
+        results = []
+        episodes_trained = 0
+        rollout_idx = 0
+
+        while episodes_trained < num_episodes:
+            buffer = RolloutBuffer(
+                buffer_size=steps_per_rollout,
+                obs_dim=obs_dim,
+                action_dim=NUM_DOF,
+                gamma=self.config.gamma,
+                gae_lambda=self.config.gae_lambda,
+                device=self.config.device,
+            )
+
+            # Collect experience
+            rollout_info = self._collect_rollout(
+                buffer, target_audio_emb, target_lip_vertices,
+            )
+            episodes_trained += rollout_info["num_episodes"]
+
+            # PPO update
+            update_result = ppo_update(
+                policy=self.policy,
+                optimizer=self.optimizer,
+                buffer=buffer,
+                n_epochs=self.config.n_epochs,
+                batch_size=self.config.batch_size,
+                clip_range=self.config.clip_range,
+                vf_coef=self.config.vf_coef,
+                ent_coef=self.config.ent_coef,
+                max_grad_norm=self.config.max_grad_norm,
+            )
+
+            # Log
+            rollout_idx += 1
+            self.logger.log_training_step(
+                step=rollout_idx,
+                policy_loss=update_result.policy_loss,
+                value_loss=update_result.value_loss,
+                entropy=update_result.entropy,
+                learning_rate=self.config.learning_rate,
+            )
+            self.logger.log_scalar(
+                "train/explained_variance", update_result.explained_variance, step=rollout_idx,
+            )
+            self.logger.log_scalar(
+                "reward/mean_episode", rollout_info["mean_episode_reward"], step=rollout_idx,
+            )
+
+            result = {
+                "rollout": rollout_idx,
+                "episodes_trained": episodes_trained,
+                **rollout_info,
+                "policy_loss": update_result.policy_loss,
+                "value_loss": update_result.value_loss,
+                "entropy": update_result.entropy,
+                "explained_variance": update_result.explained_variance,
+            }
+            results.append(result)
+            self._episode_rewards.append(rollout_info["mean_episode_reward"])
+
+            # Checkpoint
+            if self._episode_count % self.config.checkpoint_interval == 0:
+                self.save_checkpoint()
+
+            logger.info(
+                f"Rollout {rollout_idx}: {rollout_info['num_episodes']} eps, "
+                f"mean_reward={rollout_info['mean_episode_reward']:.4f}, "
+                f"policy_loss={update_result.policy_loss:.4f}, "
+                f"value_loss={update_result.value_loss:.4f}"
+            )
+
+        return results
+
     def save_checkpoint(self, path: str | None = None) -> str:
         """Save training state checkpoint.
 
@@ -326,6 +548,10 @@ class OpenJawTrainer:
             "config": self.config,
             "episode_rewards": self._episode_rewards[-100:],  # Last 100
         }
+        if hasattr(self, "policy"):
+            checkpoint["policy_state_dict"] = self.policy.state_dict()
+        if hasattr(self, "optimizer"):
+            checkpoint["optimizer_state_dict"] = self.optimizer.state_dict()
         torch.save(checkpoint, path)
         logger.info(f"Checkpoint saved: {path}")
         return path
@@ -340,6 +566,10 @@ class OpenJawTrainer:
         self.curriculum._total_episodes = self._episode_count
         self._episode_rewards = checkpoint.get("episode_rewards", [])
         self._update_reward_mode()
+        if "policy_state_dict" in checkpoint and hasattr(self, "policy"):
+            self.policy.load_state_dict(checkpoint["policy_state_dict"])
+        if "optimizer_state_dict" in checkpoint and hasattr(self, "optimizer"):
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         logger.info(f"Checkpoint loaded: {path} (episode {self._episode_count})")
 
     def close(self) -> None:
