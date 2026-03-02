@@ -27,6 +27,10 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Secrets / env
+.env
+.env.*
+
 # Project specific
 checkpoints/
 logs/
